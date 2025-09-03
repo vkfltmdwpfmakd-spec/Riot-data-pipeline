@@ -1,0 +1,10 @@
+services:
+  data-collection:
+    build: ./data-collection
+    environment:
+      - RIOT_API_KEY=${RIOT_API_KEY}
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - GOOGLE_APPLICATION_CREDENTIALS=/tmp/key.json
+    volumes:
+      - ./data-collection:/app
+      - ./service-account.json:/tmp/key.json:ro
