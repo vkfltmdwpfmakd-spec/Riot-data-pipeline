@@ -42,7 +42,7 @@ class MatchDataSchema:
                   bigquery.SchemaField("participants_count", "INTEGER", mode="REQUIRED"),
 
                   # 팀 정보 (JSON으로 저장)
-                  bigquery.SchemaField("teams_data", "JSON", mode="REPEATED"),
+                  bigquery.SchemaField("teams_data", "JSON", mode="NULLABLE"),
 
                   # 수집 메타데이터
                   bigquery.SchemaField("collected_at", "TIMESTAMP", mode="REQUIRED")
@@ -131,7 +131,7 @@ class MatchDataSchema:
                   bigquery.SchemaField("collected_at", "TIMESTAMP", mode="REQUIRED")
             ]
 
-            table = self.client.create_table(table_ref, schema=schema)
+            table = bigquery.Table(table_ref, schema=schema)
 
             # 날짜별 파티셔닝
             table.time_partitioning = bigquery.TimePartitioning(field="game_creation")

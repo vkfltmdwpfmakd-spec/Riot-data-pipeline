@@ -112,18 +112,25 @@ class RiotClient:
 
         # 기본 매치 정보
         match_record = {
-            'match_id': metadata.get('matchId'),
-            'game_creation': datetime.fromtimestamp(info.get('gameCreation', 0) / 1000, tz=ZoneInfo("UTC")),
-            'game_duration': info.get('gameDuration', 0),
-            'game_mode': info.get('gameMode'),
-            'queue_id': info.get('queueId'),
-            'teams_data': info.get('teams', [])
+            'match_id': metadata.get('matchId'),  # 매치 고유 ID (REQUIRED)
+            'data_version': metadata.get('dataVersion', '1.0'),  # API 데이터 버전 (REQUIRED)
+            'game_creation': datetime.fromtimestamp(info.get('gameCreation', 0) / 1000, tz=ZoneInfo("Asia/Seoul")),  # 게임 생성 시간 KST (REQUIRED)
+            'game_duration': info.get('gameDuration', 0),  # 게임 지속 시간(초) (REQUIRED)
+            'game_mode': info.get('gameMode', 'CLASSIC'),  # 게임 모드 (CLASSIC, ARAM, CHERRY 등) (REQUIRED)
+            'game_type': info.get('gameType', 'MATCHED_GAME'),  # 게임 타입 (MATCHED_GAME 등) (REQUIRED)
+            'game_version': info.get('gameVersion', '14.18'),  # 게임 클라이언트 버전 (REQUIRED)
+            'queue_id': info.get('queueId', 420),  # 큐 ID (420=랭크, 1700=아레나 등) (REQUIRED)
+            'map_id': info.get('mapId', 11),  # 맵 ID (11=소환사의 협곡) (REQUIRED)
+            'platform_id': info.get('platformId', 'KR'),  # 플랫폼 ID (KR, NA1 등) (REQUIRED)
+            'game_end_timestamp': datetime.fromtimestamp(info.get('gameEndTimestamp', 0) / 1000, tz=ZoneInfo("Asia/Seoul")) if info.get('gameEndTimestamp') else None,  # 게임 종료 시간 KST (NULLABLE)
+            'participants_count': len(info.get('participants', [])),  # 실제 참가자 수 (REQUIRED)
+            'teams_data': info.get('teams', [])  # 팀별 상세 정보 리스트 (REPEATED)
         }
 
         return match_record
     
     def extract_participants_data(self, match_data: Dict) -> List[Dict]:
-        """매치 상세 데이터 변환"""
+        """매치 참가자 데이터 변환 (BigQuery 스키마와 완전 일치)"""
 
         if not match_data:
             return []
@@ -131,28 +138,67 @@ class RiotClient:
         metadata = match_data.get("metadata", {})
         info = match_data.get("info", {})
         match_id = metadata.get("matchId")
+        game_creation_kst = datetime.fromtimestamp(info.get('gameCreation', 0) / 1000, tz=ZoneInfo("Asia/Seoul"))  # KST 변환
 
         participants_data = []
 
         for participant in info.get("participants", []):
             participant_record = {
-                'match_id': match_id,
-                'puuid': participant.get('puuid'),
-                'champion_id': participant.get('championId'),
-                'champion_name': participant.get('championName'),
-                'summoner_name': participant.get('summonerName'),
-                'team_id': participant.get('teamId'),
-                'team_position': participant.get('teamPosition'),
-                'kills': participant.get('kills', 0),
-                'deaths': participant.get('deaths', 0),
-                'assists': participant.get('assists', 0),
-                'total_damage_dealt_to_champions': participant.get('totalDamageDealtToChampions', 0),
-                'vision_score': participant.get('visionScore', 0),
-                'gold_earned': participant.get('goldEarned', 0),
-                'total_minions_killed': participant.get('totalMinionsKilled', 0),
-                'champ_level': participant.get('champLevel', 1),
-                'win': participant.get('win', False),
-                'detailed_stats': participant  # 전체 상세 정보는 JSON으로 저장
+                # 관계 키들
+                'match_id': match_id,  # 매치 ID (REQUIRED)
+                'participant_id': participant.get('participantId', 0),  # 참가자 번호 (REQUIRED)
+                'puuid': participant.get('puuid'),  # 플레이어 고유 ID (REQUIRED)
+                
+                # 플레이어 기본 정보
+                'summoner_name': participant.get('summonerName'),  # 소환사명 (NULLABLE)
+                'riot_id_game_name': participant.get('riotIdGameName'),  # 라이엇 게임명 (NULLABLE)
+                'riot_id_tagline': participant.get('riotIdTagline'),  # 라이엇 태그 (NULLABLE)
+                'summoner_level': participant.get('summonerLevel'),  # 소환사 레벨 (NULLABLE)
+                
+                # 챔피언 정보
+                'champion_id': participant.get('championId', 0),  # 챔피언 ID (REQUIRED)
+                'champion_name': participant.get('championName', 'Unknown'),  # 챔피언 이름 (REQUIRED)
+                'champion_level': participant.get('champLevel', 1),  # 챔피언 레벨 (REQUIRED)
+                
+                # 게임 결과
+                'win': participant.get('win', False),  # 승리 여부 (REQUIRED)
+                'team_id': participant.get('teamId', 100),  # 팀 ID (100=블루, 200=레드) (REQUIRED)
+                'team_position': participant.get('teamPosition'),  # 팀 내 포지션 (NULLABLE)
+                'individual_position': participant.get('individualPosition'),  # 개별 포지션 (NULLABLE)
+                
+                # 핵심 통계 (KDA)
+                'kills': participant.get('kills', 0),  # 킬 수 (REQUIRED)
+                'deaths': participant.get('deaths', 0),  # 데스 수 (REQUIRED)
+                'assists': participant.get('assists', 0),  # 어시스트 수 (REQUIRED)
+                
+                # 게임 플레이 통계
+                'total_minions_killed': participant.get('totalMinionsKilled', 0),  # CS (미니언 킬) (REQUIRED)
+                'neutral_minions_killed': participant.get('neutralMinionsKilled', 0),  # 정글 몬스터 킬 (REQUIRED)
+                'gold_earned': participant.get('goldEarned', 0),  # 획득 골드 (REQUIRED)
+                'total_damage_dealt_to_champions': participant.get('totalDamageDealtToChampions', 0),  # 챔피언 딜량 (REQUIRED)
+                'vision_score': participant.get('visionScore', 0),  # 시야 점수 (REQUIRED)
+                
+                # 아이템 정보 (6개 슬롯 + 장신구)
+                'item0': participant.get('item0', 0),  # 아이템 슬롯 0 (NULLABLE)
+                'item1': participant.get('item1', 0),  # 아이템 슬롯 1 (NULLABLE)
+                'item2': participant.get('item2', 0),  # 아이템 슬롯 2 (NULLABLE)
+                'item3': participant.get('item3', 0),  # 아이템 슬롯 3 (NULLABLE)
+                'item4': participant.get('item4', 0),  # 아이템 슬롯 4 (NULLABLE)
+                'item5': participant.get('item5', 0),  # 아이템 슬롯 5 (NULLABLE)
+                'item6': participant.get('item6', 0),  # 아이템 슬롯 6 (장신구) (NULLABLE)
+                
+                # 스펠 정보
+                'summoner1_id': participant.get('summoner1Id'),  # 소환사 주문 1 (NULLABLE)
+                'summoner2_id': participant.get('summoner2Id'),  # 소환사 주문 2 (NULLABLE)
+                
+                # 특수 모드 (아레나 등)
+                'placement': participant.get('placement'),  # 순위 (아레나 모드용) (NULLABLE)
+                'subteam_placement': participant.get('subteamPlacement'),  # 서브팀 순위 (NULLABLE)
+                
+                # 상세 통계 및 메타데이터
+                'detailed_stats': participant,  # 전체 상세 통계 (JSON) (NULLABLE)
+                'game_creation': game_creation_kst,  # 게임 생성 시간 KST (파티셔닝용) (REQUIRED)
+                'collected_at': datetime.now(ZoneInfo("Asia/Seoul"))  # 데이터 수집 시간 KST (REQUIRED)
             }
 
             participants_data.append(participant_record)
