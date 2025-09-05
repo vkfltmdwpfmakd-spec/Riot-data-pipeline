@@ -68,33 +68,51 @@ class BigQueryClient:
             return True
     
     def insert_challenger_data(self, data: List[Dict]):
-        """챌린저 데이터 bigquery에 삽입"""
+        """챌린저 데이터 bigquery에 삽입 MERGE 쿼리로 UPSERT (중복 방지)"""
 
-        table_ref = self.client.dataset(self.dataset_id).table(self.table_id)
-
-        # bigquery 형식으로 변환
-        rows_to_insert = []
-        for row in data:
-            formatted_row = {
-                "puuid": row["puuid"],
-                "league_points": row["league_points"],
-                "wins": row["wins"],
-                "losses": row["losses"],
-                "is_veteran": row["is_veteran"],
-                "is_hot_streak": row["is_hot_streak"],
-                "collected_at": row["collected_at"].isoformat()
-            }
-            rows_to_insert.append(formatted_row)
-
-        errors = self.client.insert_rows_json(table_ref, rows_to_insert)
-
-        if errors:
-            print(f"데이터 삽입 중 에러 발생 : {errors}")
-            return False
-        else:
-            print(f"{len(rows_to_insert)}개의 데이터 삽입 완료")
+        if not data:
+            print("저장할 챌린저 데이터가 없습니다.")
             return True
+
+        # STRUCT 배열용 데이터 준비
+        struct_rows = []
+        for row in data:
+            struct_row = f"STRUCT('{row['puuid']}' AS puuid, {row['league_points']} AS league_points, {row['wins']} AS wins, {row['losses']} AS losses, {row['is_veteran']} AS is_veteran, {row['is_hot_streak']} AS is_hot_streak, TIMESTAMP('{row['collected_at'].isoformat()}') AS collected_at)"
+            struct_rows.append(struct_row)
         
+        # MERGE 쿼리 (STRUCT 배열 사용)
+        merge_query = f"""
+        MERGE `{self.project_id}.{self.dataset_id}.{self.table_id}` AS target
+        USING (
+            SELECT * FROM UNNEST([{', '.join(struct_rows)}])
+        ) AS source
+        ON target.puuid = source.puuid
+
+        WHEN MATCHED THEN
+            UPDATE SET
+            league_points = source.league_points,
+            wins = source.wins,
+            losses = source.losses,
+            is_veteran = source.is_veteran,
+            is_hot_streak = source.is_hot_streak,
+            collected_at = source.collected_at
+
+        WHEN NOT MATCHED THEN
+            INSERT (puuid, league_points, wins, losses, is_veteran, is_hot_streak, collected_at)
+            VALUES (source.puuid, source.league_points, source.wins, source.losses, source.is_veteran, source.is_hot_streak, source.collected_at)
+        """
+
+        try:
+            query_job = self.client.query(merge_query)
+            result = query_job.result()
+
+            print(f"MERGE 완료 - 처리된 행: {query_job.num_dml_affected_rows}개")
+            return True
+            
+        except Exception as e:
+            print(f"MERGE 실패: {e}")
+            return False
+
             
     def create_match_tables_if_not_exists(self):
         """매치 관련 테이블 생성"""
@@ -102,121 +120,198 @@ class BigQueryClient:
     
 
     def insert_match_data(self, matches_data: List[Dict]) -> bool:
-        """매치 기본 데이터 bigquery에 삽입"""
+        """매치 기본 데이터 bigquery에 삽입 MERGE 쿼리로 UPSERT (중복 방지)"""
 
         if not matches_data:
             print("저장할 매치 데이터가 없습니다.")
             return True
-        
-        table_ref = self.client.dataset(self.dataset_id).table("matches")
 
-        rows_to_insert = []
+        # STRUCT 배열용 데이터 준비
+        struct_rows = []
         for match in matches_data:
-            formatted_row = {
-                "match_id": match["match_id"],  # 매치 고유 ID (REQUIRED)
-                "data_version": match.get("data_version", "1.0"),  # API 데이터 버전 (REQUIRED)
-                "game_creation": match["game_creation"].strftime('%Y-%m-%d %H:%M:%S'),  # 게임 생성 시간 KST (REQUIRED)
-                "game_duration": match["game_duration"],  # 게임 지속 시간(초) (REQUIRED)
-                "game_mode": match["game_mode"],  # 게임 모드 (CLASSIC, ARAM, CHERRY 등) (REQUIRED)
-                "game_type": match.get("game_type", "MATCHED_GAME"),  # 게임 타입 (REQUIRED)
-                "game_version": match.get("game_version", "14.18.1"),  # 게임 클라이언트 버전 (REQUIRED)
-                "queue_id": match["queue_id"],  # 큐 ID (420=랭크, 1700=아레나 등) (REQUIRED)
-                "map_id": match.get("map_id", 11),  # 맵 ID (11=소환사의 협곡) (REQUIRED)
-                "platform_id": match.get("platform_id", "KR"),  # 플랫폼 ID (KR, NA1 등) (REQUIRED)
-                "game_end_timestamp": match["game_end_timestamp"].strftime('%Y-%m-%d %H:%M:%S') if match.get("game_end_timestamp") else None,  # 게임 종료 시간 KST (NULLABLE)
-                "participants_count": match["participants_count"],  # 실제 참가자 수 (REQUIRED)
-                "teams_data": json.dumps(match["teams_data"], ensure_ascii=False),  # 팀별 상세 정보를 JSON 문자열로 변환 (REPEATED)
-                "collected_at": datetime.now(ZoneInfo("Asia/Seoul")).isoformat()  # 데이터 수집 시간 KST (REQUIRED)
-            }
-            rows_to_insert.append(formatted_row)
+            game_end_ts = f"TIMESTAMP('{match['game_end_timestamp'].strftime('%Y-%m-%d %H:%M:%S')}')" if match.get("game_end_timestamp") else "NULL"
+            teams_data_json = json.dumps(match["teams_data"], ensure_ascii=False).replace("'", "\\'")
+            
+            struct_row = f"""STRUCT(
+                '{match["match_id"]}' AS match_id,
+                '{match.get("data_version", "1.0")}' AS data_version,
+                TIMESTAMP('{match["game_creation"].strftime('%Y-%m-%d %H:%M:%S')}') AS game_creation,
+                {match["game_duration"]} AS game_duration,
+                '{match["game_mode"]}' AS game_mode,
+                '{match.get("game_type", "MATCHED_GAME")}' AS game_type,
+                '{match.get("game_version", "14.18.1")}' AS game_version,
+                {match["queue_id"]} AS queue_id,
+                {match.get("map_id", 11)} AS map_id,
+                '{match.get("platform_id", "KR")}' AS platform_id,
+                {game_end_ts} AS game_end_timestamp,
+                {match["participants_count"]} AS participants_count,
+                PARSE_JSON('{teams_data_json}') AS teams_data,
+                TIMESTAMP('{datetime.now(ZoneInfo("Asia/Seoul")).isoformat()}') AS collected_at
+            )"""
+            struct_rows.append(struct_row)
+        
+        # MERGE 쿼리 (STRUCT 배열 사용)
+        merge_query = f"""
+        MERGE `{self.project_id}.{self.dataset_id}.matches` AS target
+        USING (
+            SELECT * FROM UNNEST([{', '.join(struct_rows)}])
+        ) AS source
+        ON target.match_id = source.match_id
 
-        errors = self.client.insert_rows_json(table_ref, rows_to_insert)
+        WHEN MATCHED THEN
+            UPDATE SET
+            data_version = source.data_version,
+            game_creation = source.game_creation,
+            game_duration = source.game_duration,
+            game_mode = source.game_mode,
+            game_type = source.game_type,
+            game_version = source.game_version,
+            queue_id = source.queue_id,
+            map_id = source.map_id,
+            platform_id = source.platform_id,
+            game_end_timestamp = source.game_end_timestamp,
+            participants_count = source.participants_count,
+            teams_data = source.teams_data,
+            collected_at = source.collected_at
 
-        if errors:
-            print(f"매치 데이터 저장 실패 : {errors}")
-            return False
-        else:
-            print(f"{len(rows_to_insert)}개 매치 데이터 저장 완료")
+        WHEN NOT MATCHED THEN
+            INSERT (match_id, data_version, game_creation, game_duration, game_mode, game_type, game_version, queue_id, map_id, platform_id, game_end_timestamp, participants_count, teams_data, collected_at)
+            VALUES (source.match_id, source.data_version, source.game_creation, source.game_duration, source.game_mode, source.game_type, source.game_version, source.queue_id, source.map_id, source.platform_id, source.game_end_timestamp, source.participants_count, source.teams_data, source.collected_at)
+        """
+
+        try:
+            query_job = self.client.query(merge_query)
+            result = query_job.result()
+
+            print(f"MERGE 완료 - 처리된 행: {query_job.num_dml_affected_rows}개")
             return True
+            
+        except Exception as e:
+            print(f"MERGE 실패: {e}")
+            return False
+
+
         
     def insert_participants_data(self, participants_data: List[Dict]) -> bool:
-        """매치 상세 정보 bigquery에 삽입"""
+        """매치 상세 정보 bigquery에 삽입 MERGE 쿼리로 UPSERT (중복 방지)"""
 
         if not participants_data:
             print("저장할 매치 상세 데이터가 없습니다.")
             return True
-        
-        table_ref = self.client.dataset(self.dataset_id).table("match_participants")
 
-        rows_to_insert = []
+        # STRUCT 배열용 데이터 준비
+        struct_rows = []
         for participant in participants_data:
-            formatted_row = {
-                # 관계 키들
-                "match_id": participant["match_id"],  # 매치 ID (REQUIRED)
-                "participant_id": participant["participant_id"],  # 참가자 번호 (REQUIRED)
-                "puuid": participant["puuid"],  # 플레이어 고유 ID (REQUIRED)
-
-                # 플레이어 기본 정보
-                "summoner_name": participant["summoner_name"],  # 소환사명 (NULLABLE)
-                "riot_id_game_name": participant["riot_id_game_name"],  # 라이엇 게임명 (NULLABLE)
-                "riot_id_tagline": participant["riot_id_tagline"],  # 라이엇 태그 (NULLABLE)
-                "summoner_level": participant["summoner_level"],  # 소환사 레벨 (NULLABLE)
-
-                # 챔피언 정보
-                "champion_id": participant["champion_id"],  # 챔피언 ID (REQUIRED)
-                "champion_name": participant["champion_name"],  # 챔피언 이름 (REQUIRED)
-                "champion_level": participant["champion_level"],  # 챔피언 레벨 (REQUIRED)
-
-                # 게임 결과
-                "win": participant["win"],  # 승리 여부 (REQUIRED)
-                "team_id": participant["team_id"],  # 팀 ID (REQUIRED)
-                "team_position": participant["team_position"],  # 팀 내 포지션 (NULLABLE)
-                "individual_position": participant["individual_position"],  # 개별 포지션 (NULLABLE)
-
-                # 핵심 통계 (KDA)
-                "kills": participant["kills"],  # 킬 수 (REQUIRED)
-                "deaths": participant["deaths"],  # 데스 수 (REQUIRED)
-                "assists": participant["assists"],  # 어시스트 수 (REQUIRED)
-
-                # 게임 플레이 통계
-                "total_minions_killed": participant["total_minions_killed"],  # CS (REQUIRED)
-                "neutral_minions_killed": participant["neutral_minions_killed"],  # 정글 몬스터 킬 (REQUIRED)
-                "gold_earned": participant["gold_earned"],  # 획득 골드 (REQUIRED)
-                "total_damage_dealt_to_champions": participant["total_damage_dealt_to_champions"],  # 챔피언 딜량 (REQUIRED)
-                "vision_score": participant["vision_score"],  # 시야 점수 (REQUIRED)
-
-                # 아이템 정보
-                "item0": participant["item0"],  # 아이템 슬롯 0 (NULLABLE)
-                "item1": participant["item1"],  # 아이템 슬롯 1 (NULLABLE)
-                "item2": participant["item2"],  # 아이템 슬롯 2 (NULLABLE)
-                "item3": participant["item3"],  # 아이템 슬롯 3 (NULLABLE)
-                "item4": participant["item4"],  # 아이템 슬롯 4 (NULLABLE)
-                "item5": participant["item5"],  # 아이템 슬롯 5 (NULLABLE)
-                "item6": participant["item6"],  # 아이템 슬롯 6 (NULLABLE)
-
-                # 스펠 정보
-                "summoner1_id": participant["summoner1_id"],  # 소환사 주문 1 (NULLABLE)
-                "summoner2_id": participant["summoner2_id"],  # 소환사 주문 2 (NULLABLE)
-
-                # 특수 모드
-                "placement": participant["placement"],  # 순위 (아레나 모드용) (NULLABLE)
-                "subteam_placement": participant["subteam_placement"],  # 서브팀 순위 (NULLABLE)
-
-                # 상세 통계 및 메타데이터
-                "detailed_stats": json.dumps(participant["detailed_stats"], ensure_ascii=False),  # 전체 상세 통계를 JSON 문자열로 변환 (NULLABLE)
-                "game_creation": participant["game_creation"].strftime('%Y-%m-%d %H:%M:%S'),  # 게임 생성 시간 KST (REQUIRED)
-                "collected_at": participant["collected_at"].strftime('%Y-%m-%d %H:%M:%S')  # 데이터 수집 시간 KST (REQUIRED)
-            }
-            rows_to_insert.append(formatted_row)
+            # NULL 처리 함수
+            def safe_str(value):
+                return f"'{value}'" if value is not None else "NULL"
+            
+            def safe_int(value):
+                return str(value) if value is not None else "NULL"
+            
+            # JSON 문자열 이스케이프 처리
+            detailed_stats_json = json.dumps(participant["detailed_stats"], ensure_ascii=False).replace("'", "\\'")
+            
+            struct_row = f"""STRUCT(
+                '{participant["match_id"]}' AS match_id,
+                {participant["participant_id"]} AS participant_id,
+                '{participant["puuid"]}' AS puuid,
+                {safe_str(participant["summoner_name"])} AS summoner_name,
+                {safe_str(participant["riot_id_game_name"])} AS riot_id_game_name,
+                {safe_str(participant["riot_id_tagline"])} AS riot_id_tagline,
+                {safe_int(participant["summoner_level"])} AS summoner_level,
+                {participant["champion_id"]} AS champion_id,
+                '{participant["champion_name"]}' AS champion_name,
+                {participant["champion_level"]} AS champion_level,
+                {participant["win"]} AS win,
+                {participant["team_id"]} AS team_id,
+                {safe_str(participant["team_position"])} AS team_position,
+                {safe_str(participant["individual_position"])} AS individual_position,
+                {participant["kills"]} AS kills,
+                {participant["deaths"]} AS deaths,
+                {participant["assists"]} AS assists,
+                {participant["total_minions_killed"]} AS total_minions_killed,
+                {participant["neutral_minions_killed"]} AS neutral_minions_killed,
+                {participant["gold_earned"]} AS gold_earned,
+                {participant["total_damage_dealt_to_champions"]} AS total_damage_dealt_to_champions,
+                {participant["vision_score"]} AS vision_score,
+                {safe_int(participant["item0"])} AS item0,
+                {safe_int(participant["item1"])} AS item1,
+                {safe_int(participant["item2"])} AS item2,
+                {safe_int(participant["item3"])} AS item3,
+                {safe_int(participant["item4"])} AS item4,
+                {safe_int(participant["item5"])} AS item5,
+                {safe_int(participant["item6"])} AS item6,
+                {safe_int(participant["summoner1_id"])} AS summoner1_id,
+                {safe_int(participant["summoner2_id"])} AS summoner2_id,
+                {safe_int(participant["placement"])} AS placement,
+                {safe_int(participant["subteam_placement"])} AS subteam_placement,
+                PARSE_JSON('{detailed_stats_json}') AS detailed_stats,
+                TIMESTAMP('{participant["game_creation"].strftime('%Y-%m-%d %H:%M:%S')}') AS game_creation,
+                TIMESTAMP('{participant["collected_at"].strftime('%Y-%m-%d %H:%M:%S')}') AS collected_at
+            )"""
+            struct_rows.append(struct_row)
         
-        errors = self.client.insert_rows_json(table_ref, rows_to_insert)
+        # MERGE 쿼리 (STRUCT 배열 사용)
+        merge_query = f"""
+        MERGE `{self.project_id}.{self.dataset_id}.match_participants` AS target
+        USING (
+            SELECT * FROM UNNEST([{', '.join(struct_rows)}])
+        ) AS source
+        ON target.match_id = source.match_id AND target.puuid = source.puuid
 
-        if errors:
-            print(f"매치 상세 데이터 저장 실패 : {errors}")
-            return False
-        else:
-            print(f"{len(rows_to_insert)}개 매치 상세 데이터 저장 완료")
+        WHEN MATCHED THEN
+            UPDATE SET
+            participant_id = source.participant_id,
+            summoner_name = source.summoner_name,
+            riot_id_game_name = source.riot_id_game_name,
+            riot_id_tagline = source.riot_id_tagline,
+            summoner_level = source.summoner_level,
+            champion_id = source.champion_id,
+            champion_name = source.champion_name,
+            champion_level = source.champion_level,
+            win = source.win,
+            team_id = source.team_id,
+            team_position = source.team_position,
+            individual_position = source.individual_position,
+            kills = source.kills,
+            deaths = source.deaths,
+            assists = source.assists,
+            total_minions_killed = source.total_minions_killed,
+            neutral_minions_killed = source.neutral_minions_killed,
+            gold_earned = source.gold_earned,
+            total_damage_dealt_to_champions = source.total_damage_dealt_to_champions,
+            vision_score = source.vision_score,
+            item0 = source.item0,
+            item1 = source.item1,
+            item2 = source.item2,
+            item3 = source.item3,
+            item4 = source.item4,
+            item5 = source.item5,
+            item6 = source.item6,
+            summoner1_id = source.summoner1_id,
+            summoner2_id = source.summoner2_id,
+            placement = source.placement,
+            subteam_placement = source.subteam_placement,
+            detailed_stats = source.detailed_stats,
+            game_creation = source.game_creation,
+            collected_at = source.collected_at
+
+        WHEN NOT MATCHED THEN
+            INSERT (match_id, participant_id, puuid, summoner_name, riot_id_game_name, riot_id_tagline, summoner_level, champion_id, champion_name, champion_level, win, team_id, team_position, individual_position, kills, deaths, assists, total_minions_killed, neutral_minions_killed, gold_earned, total_damage_dealt_to_champions, vision_score, item0, item1, item2, item3, item4, item5, item6, summoner1_id, summoner2_id, placement, subteam_placement, detailed_stats, game_creation, collected_at)
+            VALUES (source.match_id, source.participant_id, source.puuid, source.summoner_name, source.riot_id_game_name, source.riot_id_tagline, source.summoner_level, source.champion_id, source.champion_name, source.champion_level, source.win, source.team_id, source.team_position, source.individual_position, source.kills, source.deaths, source.assists, source.total_minions_killed, source.neutral_minions_killed, source.gold_earned, source.total_damage_dealt_to_champions, source.vision_score, source.item0, source.item1, source.item2, source.item3, source.item4, source.item5, source.item6, source.summoner1_id, source.summoner2_id, source.placement, source.subteam_placement, source.detailed_stats, source.game_creation, source.collected_at)
+        """
+
+        try:
+            query_job = self.client.query(merge_query)
+            result = query_job.result()
+
+            print(f"MERGE 완료 - 처리된 행: {query_job.num_dml_affected_rows}개")
             return True
+            
+        except Exception as e:
+            print(f"MERGE 실패: {e}")
+            return False
 
 
     def test_connection(self):
