@@ -1,38 +1,118 @@
 import os
 import requests
 import time
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
+# 상위 디렉토리의 모듈들 import
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
+try:
+    from config import Config
+    from rate_limiter import AdaptiveRateLimit
+except ImportError as e:
+    print(f"Import error: {e}")
+    print("config.py와 rate_limiter.py가 상위 디렉토리에 있는지 확인하세요.")
+    # 기본값으로 폴백
+    class Config:
+        RIOT_BASE_URL = "https://kr.api.riotgames.com"
+        RIOT_MATCH_URL = "https://asia.api.riotgames.com"
+        DEFAULT_QUEUE = "RANKED_SOLO_5x5"
+        DEFAULT_MATCH_COUNT = 20
+        API_RATE_LIMIT_DELAY = 0.5
+        RETRY_DELAY = 2.0
+        MAX_RETRIES = 3
+        PLAYER_BATCH_DELAY = 1.0
+        riot_api_key = os.getenv("RIOT_API_KEY")
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        dataset_id = "riot_analytics"
+        is_production = os.getenv("ENV") == "production"
+        matches_per_player = 20 if is_production else 5
+        challenger_count = 300 if is_production else 50
+    
+    # 단순한 레이트 리미터 폴백
+    class AdaptiveRateLimit:
+        def __init__(self, initial_delay=0.5, max_delay=10.0, min_delay=0.1):
+            self.delay = initial_delay
+        def wait_if_needed(self):
+            import time
+            time.sleep(self.delay)
+        def record_response(self, status_code, response_time=None):
+            if status_code == 429:
+                self.delay = min(self.delay * 1.5, 10.0)
+        def get_stats(self):
+            return {'total_requests': 0, 'rate_limited_requests': 0, 'rate_limit_percentage': 0, 'total_wait_time': 0, 'avg_wait_time_per_request': 0}
+
+# 로거 설정
+logger = logging.getLogger(__name__)
 
 class RiotClient:
-    def __init__(self):
+    def __init__(self, config: Optional[Config] = None):
         load_dotenv()
-        self.api_key = os.getenv("RIOT_API_KEY")
-        self.base_url = "https://kr.api.riotgames.com"
-        self.queue = "RANKED_SOLO_5x5"
+        self.config = config or Config()
+        self.api_key = self.config.riot_api_key
+        
+        if not self.api_key:
+            raise ValueError("RIOT_API_KEY가 설정되지 않았습니다. 환경변수를 확인해주세요.")
+        
+        self.base_url = self.config.RIOT_BASE_URL
+        self.match_url = self.config.RIOT_MATCH_URL
+        self.queue = self.config.DEFAULT_QUEUE
+        
         self.headers = {
             'X-Riot-Token': self.api_key
         }
         self.kst_now = datetime.now(ZoneInfo("Asia/Seoul"))
+        
+        # 적응형 레이트 리미터 설정
+        self.rate_limiter = AdaptiveRateLimit(
+            initial_delay=self.config.API_RATE_LIMIT_DELAY,
+            max_delay=10.0,
+            min_delay=0.1
+        )
     
     def get_challenger_league(self) -> Optional[Dict]:
         """챌린저 리그 정보 조회"""
-
         url = f"{self.base_url}/lol/league/v4/challengerleagues/by-queue/{self.queue}"
-
+        
+        # 레이트 리밋 대기
+        self.rate_limiter.wait_if_needed()
+        
         try:
-            response = requests.get(url, headers=self.headers)
-
+            start_time = time.time()
+            response = requests.get(url, headers=self.headers, timeout=30)
+            response_time = time.time() - start_time
+            
+            # 레이트 리미터에 응답 기록
+            self.rate_limiter.record_response(response.status_code, response_time)
+            
             if response.status_code == 200:
+                logger.info(f"챌린저 리그 데이터 조회 성공 (응답시간: {response_time:.2f}s)")
                 return response.json()
+            elif response.status_code == 429:
+                logger.warning(f"레이트 리밋 발생, 자동 조정됨")
+                return self.get_challenger_league()  # 재귀 호출로 재시도
             else:
-                print(f"API 호출 실패 : {response.status_code}")
+                logger.error(f"API 호출 실패: {response.status_code} - {response.text}")
+                return None
 
+        except requests.exceptions.Timeout:
+            logger.error(f"API 호출 타임아웃: {url}")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error(f"네트워크 연결 오류: {url}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"요청 에러: {e}")
+            return None
         except Exception as e:
-            print(f"에러 : {e}")
+            logger.error(f"예상치 못한 에러: {e}")
             return None
 
     def extract_challenger_data(self, raw_data: Dict) -> List[Dict]:
@@ -58,47 +138,91 @@ class RiotClient:
 
         return processed_data
     
-    def get_match_ids_by_puuid(self, puuid: str, count: int = 20) -> List[str]:
+    def get_match_ids_by_puuid(self, puuid: str, count: int = None) -> List[str]:
         """puuid 기반으로 최근 매치 조회"""
-
-        url = f"https://asia.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids"
-        params = {"count" : count}
+        if count is None:
+            count = self.config.DEFAULT_MATCH_COUNT
+            
+        url = f"{self.match_url}/lol/match/v5/matches/by-puuid/{puuid}/ids"
+        params = {"count": count}
+        
+        # 레이트 리밋 대기
+        self.rate_limiter.wait_if_needed()
 
         try:
-            response = requests.get(url, headers=self.headers, params=params)
+            start_time = time.time()
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            response_time = time.time() - start_time
+            
+            # 레이트 리미터에 응답 기록
+            self.rate_limiter.record_response(response.status_code, response_time)
+            
             if response.status_code == 200:
-                return response.json()
+                match_ids = response.json()
+                logger.debug(f"매치 ID 조회 성공: {len(match_ids)}개 (PUUID: {puuid[:10]}...)")
+                return match_ids
             elif response.status_code == 429:
-                print("요청횟수 제한, 2초 후 재실행")
-                time.sleep(2)
+                logger.warning("매치 ID 조회 레이트 리밋, 자동 재시도")
                 return self.get_match_ids_by_puuid(puuid, count)
+            elif response.status_code == 404:
+                logger.warning(f"플레이어 매치 기록 없음: {puuid[:10]}...")
+                return []
             else:
-                print(f"매치 조회 실패 : {response.status_code}")
+                logger.error(f"매치 ID 조회 실패: {response.status_code} - {response.text}")
                 return []
         
+        except requests.exceptions.Timeout:
+            logger.error(f"매치 ID 조회 타임아웃: {puuid[:10]}...")
+            return []
+        except requests.exceptions.ConnectionError:
+            logger.error(f"매치 ID 조회 연결 오류: {puuid[:10]}...")
+            return []
+        except requests.exceptions.RequestException as e:
+            logger.error(f"매치 ID 조회 요청 에러: {e}")
+            return []
         except Exception as e:
-            print(f"매치 조회 오류 : {e}")
+            logger.error(f"매치 ID 조회 예상치 못한 에러: {e}")
             return []
         
     def get_match_details(self, match_id: str) -> Optional[Dict]:
         """매치 상세정보 조회"""
-
-        url = f"https://asia.api.riotgames.com/lol/match/v5/matches/{match_id}"
+        url = f"{self.match_url}/lol/match/v5/matches/{match_id}"
+        
+        # 레이트 리밋 대기
+        self.rate_limiter.wait_if_needed()
 
         try:
-            response = requests.get(url, headers=self.headers)
+            start_time = time.time()
+            response = requests.get(url, headers=self.headers, timeout=30)
+            response_time = time.time() - start_time
+            
+            # 레이트 리미터에 응답 기록
+            self.rate_limiter.record_response(response.status_code, response_time)
+            
             if response.status_code == 200:
+                logger.debug(f"매치 상세정보 조회 성공: {match_id}")
                 return response.json()
             elif response.status_code == 429:
-                print("요청횟수 제한, 2초 후 재실행")
-                time.sleep(2)
+                logger.warning(f"매치 상세정보 조회 레이트 리밋, 자동 재시도: {match_id}")
                 return self.get_match_details(match_id)
+            elif response.status_code == 404:
+                logger.warning(f"매치를 찾을 수 없음: {match_id}")
+                return None
             else:
-                print(f"매치 상세 조회 실패 : {response.status_code} - {match_id}")
+                logger.error(f"매치 상세 조회 실패: {response.status_code} - {match_id}")
                 return None
             
+        except requests.exceptions.Timeout:
+            logger.error(f"매치 상세정보 조회 타임아웃: {match_id}")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error(f"매치 상세정보 조회 연결 오류: {match_id}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"매치 상세정보 조회 요청 에러: {e}")
+            return None
         except Exception as e:
-            print(f"매치 상세 조회 오류 : {e}")
+            logger.error(f"매치 상세정보 조회 예상치 못한 에러: {e}")
             return None
         
     def extract_match_data(self, match_data: Dict) -> Dict:
@@ -242,15 +366,25 @@ class RiotClient:
                 all_participants.extend(participants)
 
                 processed_match_ids.add(match_id)
-
-                # RATE LIMIT 고려한 딜레이
-                time.sleep(0.5)
             
-            # 유저별 처리 후 딜레이
-            time.sleep(1)
+            # 플레이어별 처리 후 딜레이 (설정값 사용)
+            if i < len(challenger_data) - 1:  # 마지막 플레이어가 아닌 경우만
+                time.sleep(self.config.PLAYER_BATCH_DELAY)
 
-        print(f"매치 수집 완료 : {len(all_matches)}개 매치 , {len(all_participants)}명 유저")
+        # 레이트 리미터 통계 출력
+        stats = self.rate_limiter.get_stats()
+        logger.info(f"매치 수집 완료: {len(all_matches)}개 매치, {len(all_participants)}명 참가자")
+        logger.info(f"API 호출 통계: {stats['total_requests']}회 요청, "
+                   f"{stats['rate_limited_requests']}회 레이트 리밋 "
+                   f"({stats['rate_limit_percentage']:.1f}%)")
+        logger.info(f"총 대기시간: {stats['total_wait_time']:.1f}초, "
+                   f"평균 요청당 대기: {stats['avg_wait_time_per_request']:.2f}초")
+        
         return all_matches, all_participants
+    
+    def get_rate_limit_stats(self) -> Dict:
+        """레이트 리미터 통계 반환"""
+        return self.rate_limiter.get_stats()
 
 
                     

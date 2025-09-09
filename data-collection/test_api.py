@@ -13,8 +13,9 @@ def test_riot_api():
         print("RIOT_API_KEY가 설정 되지 않았습니다. .env 파일을 확인해 주세요.")
         return
     
-    print(f"API 키 길이: {len(api_key) if api_key else 0}")
-    print(f"API 키 첫 10자리: {api_key[:10] if api_key else 'None'}")
+    print(f"API 키 설정 상태: {'설정됨' if api_key else '설정되지 않음'}")
+    if api_key:
+        print(f"API 키 길이: {len(api_key)}자")
 
     queue = "RANKED_SOLO_5x5"  
     url = f"https://kr.api.riotgames.com/lol/league/v4/challengerleagues/by-queue/{queue}"

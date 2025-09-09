@@ -1,37 +1,90 @@
 import os
 import json
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import List, Dict
+from typing import List, Dict, Optional
 from google.cloud import bigquery
-from google.cloud.exceptions import NotFound
+from google.cloud.exceptions import NotFound, GoogleCloudError
 from dotenv import load_dotenv
 from match_schema import MatchDataSchema
 
+# 상위 디렉토리 모듈 import
+import sys
+import os
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
+try:
+    from config import Config
+    from logger_config import get_logger
+    logger = get_logger(__name__)
+except ImportError as e:
+    print(f"Import error: {e}")
+    print("config.py와 logger_config.py가 상위 디렉토리에 있는지 확인하세요.")
+    # 기본 로깅으로 폴백
+    import logging
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.INFO)
+    
+    class Config:
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        dataset_id = "riot_analytics"
+        DATASET_LOCATION = "US"
+
 class BigQueryClient:
-    def __init__(self):
+    def __init__(self, config: Optional[Config] = None):
         load_dotenv()
-        self.project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-        self.client = bigquery.Client(project=self.project_id)
-        self.dataset_id = "riot_analytics"
+        self.config = config or Config()
+        self.project_id = self.config.project_id
+        
+        if not self.project_id:
+            raise ValueError("GOOGLE_CLOUD_PROJECT가 설정되지 않았습니다.")
+            
+        try:
+            self.client = bigquery.Client(project=self.project_id)
+            logger.info("BigQuery 클라이언트 초기화 성공", project_id=self.project_id)
+        except Exception as e:
+            logger.error("BigQuery 클라이언트 초기화 실패", error=str(e))
+            raise
+            
+        self.dataset_id = self.config.dataset_id
         self.table_id = "challengers"
         self.schema_manager = MatchDataSchema(self)
 
-    def create_dataset_if_not_exists(self):
+    def create_dataset_if_not_exists(self) -> bool:
         """데이터셋 없으면 생성"""
-
         dataset_ref = self.client.dataset(self.dataset_id)
 
         try:
             self.client.get_dataset(dataset_ref)
-            print(f"데이터셋 --{self.dataset_id}-- 이미 존재")
+            logger.info("데이터셋이 이미 존재합니다", 
+                       dataset_id=self.dataset_id)
             return True
+            
         except NotFound:
-            dataset = bigquery.Dataset(dataset_ref)
-            dataset.location = "US"
-            dataset = self.client.create_dataset(dataset)
-            print(f"데이터셋 --{self.dataset_id}-- 생성 완료")
-            return True
+            try:
+                dataset = bigquery.Dataset(dataset_ref)
+                dataset.location = self.config.DATASET_LOCATION
+                dataset = self.client.create_dataset(dataset)
+                
+                logger.info("데이터셋 생성 완료", 
+                           dataset_id=self.dataset_id, 
+                           location=self.config.DATASET_LOCATION)
+                return True
+                
+            except GoogleCloudError as e:
+                logger.error("데이터셋 생성 실패", 
+                           dataset_id=self.dataset_id, 
+                           error=str(e))
+                return False
+                
+        except GoogleCloudError as e:
+            logger.error("데이터셋 확인 실패", 
+                        dataset_id=self.dataset_id, 
+                        error=str(e))
+            return False
         
     def create_challengers_table_if_not_exists(self):
         """challengers 테이블 없으면 생성"""
