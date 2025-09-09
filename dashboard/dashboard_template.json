@@ -1,0 +1,334 @@
+{
+  "dashboard_config": {
+    "title": "Riot API 데이터 분석 대시보드",
+    "theme": {
+      "primary_color": "#0F2027",
+      "secondary_color": "#C89B3C", 
+      "accent_color": "#463714",
+      "background_color": "#F0E6D2"
+    },
+    "pages": [
+      {
+        "name": "Overview",
+        "layout": "grid",
+        "components": [
+          {
+            "type": "scorecard",
+            "title": "총 챌린저 수",
+            "data_source": "kpi_summary",
+            "metric": "total_challengers",
+            "position": {"row": 1, "col": 1, "width": 2, "height": 1}
+          },
+          {
+            "type": "scorecard", 
+            "title": "총 매치 수",
+            "data_source": "kpi_summary",
+            "metric": "total_matches",
+            "position": {"row": 1, "col": 3, "width": 2, "height": 1}
+          },
+          {
+            "type": "scorecard",
+            "title": "평균 게임 시간",
+            "data_source": "kpi_summary", 
+            "metric": "avg_game_duration_minutes",
+            "suffix": "분",
+            "position": {"row": 1, "col": 5, "width": 2, "height": 1}
+          },
+          {
+            "type": "line_chart",
+            "title": "일별 게임 수 추이",
+            "data_source": "time_analysis",
+            "x_axis": "game_date",
+            "y_axis": "games_count",
+            "position": {"row": 2, "col": 1, "width": 6, "height": 3}
+          },
+          {
+            "type": "heatmap",
+            "title": "시간대별 게임 활동",
+            "data_source": "time_analysis",
+            "x_axis": "day_name",
+            "y_axis": "game_hour", 
+            "metric": "games_count",
+            "position": {"row": 5, "col": 1, "width": 3, "height": 3}
+          },
+          {
+            "type": "bar_chart",
+            "title": "요일별 게임 분포",
+            "data_source": "time_analysis",
+            "x_axis": "day_name",
+            "y_axis": "games_count",
+            "position": {"row": 5, "col": 4, "width": 3, "height": 3}
+          }
+        ],
+        "filters": [
+          {
+            "type": "date_range",
+            "field": "game_date",
+            "default": "LAST_30_DAYS"
+          }
+        ]
+      },
+      {
+        "name": "챌린저 랭킹",
+        "layout": "grid",
+        "components": [
+          {
+            "type": "histogram",
+            "title": "챌린저 LP 분포",
+            "data_source": "challenger_dashboard",
+            "x_axis": "league_points",
+            "bins": 20,
+            "position": {"row": 1, "col": 1, "width": 3, "height": 3}
+          },
+          {
+            "type": "scatter_plot",
+            "title": "승률 vs LP 상관관계", 
+            "data_source": "challenger_dashboard",
+            "x_axis": "league_points",
+            "y_axis": "win_rate",
+            "color": "is_hot_streak",
+            "position": {"row": 1, "col": 4, "width": 3, "height": 3}
+          },
+          {
+            "type": "table",
+            "title": "상위 챌린저 TOP 20",
+            "data_source": "challenger_dashboard",
+            "columns": [
+              {"field": "current_rank", "title": "랭킹"},
+              {"field": "league_points", "title": "LP"},
+              {"field": "win_rate", "title": "승률(%)"},
+              {"field": "wins", "title": "승"},
+              {"field": "losses", "title": "패"},
+              {"field": "is_hot_streak", "title": "연승"}
+            ],
+            "sort": [{"field": "league_points", "order": "DESC"}],
+            "limit": 20,
+            "position": {"row": 4, "col": 1, "width": 6, "height": 4}
+          },
+          {
+            "type": "donut_chart",
+            "title": "베테랑/신규 비율",
+            "data_source": "challenger_dashboard", 
+            "dimension": "is_veteran",
+            "metric": "COUNT(puuid)",
+            "position": {"row": 8, "col": 1, "width": 2, "height": 2}
+          },
+          {
+            "type": "donut_chart",
+            "title": "핫스트릭 비율",
+            "data_source": "challenger_dashboard",
+            "dimension": "is_hot_streak", 
+            "metric": "COUNT(puuid)",
+            "position": {"row": 8, "col": 3, "width": 2, "height": 2}
+          }
+        ],
+        "filters": [
+          {
+            "type": "date_range",
+            "field": "collection_date",
+            "default": "LAST_7_DAYS"
+          },
+          {
+            "type": "slider",
+            "field": "league_points",
+            "min": 0,
+            "max": 3000
+          }
+        ]
+      },
+      {
+        "name": "챔피언 메타",
+        "layout": "grid", 
+        "components": [
+          {
+            "type": "bar_chart",
+            "title": "챔피언 픽률 TOP 20",
+            "data_source": "champion_stats",
+            "x_axis": "champion_name",
+            "y_axis": "games_played",
+            "sort": [{"field": "games_played", "order": "DESC"}],
+            "limit": 20,
+            "position": {"row": 1, "col": 1, "width": 3, "height": 4}
+          },
+          {
+            "type": "bar_chart", 
+            "title": "챔피언 승률 TOP 20",
+            "data_source": "champion_stats",
+            "x_axis": "champion_name",
+            "y_axis": "win_rate",
+            "sort": [{"field": "win_rate", "order": "DESC"}],
+            "limit": 20,
+            "filter": "games_played >= 10",
+            "position": {"row": 1, "col": 4, "width": 3, "height": 4}
+          },
+          {
+            "type": "scatter_plot",
+            "title": "챔피언별 KDA vs 승률",
+            "data_source": "champion_stats", 
+            "x_axis": "avg_kda",
+            "y_axis": "win_rate",
+            "size": "games_played",
+            "color": "champion_name",
+            "position": {"row": 5, "col": 1, "width": 6, "height": 4}
+          },
+          {
+            "type": "table",
+            "title": "챔피언 종합 통계",
+            "data_source": "champion_stats",
+            "columns": [
+              {"field": "champion_name", "title": "챔피언"},
+              {"field": "games_played", "title": "게임 수"},
+              {"field": "win_rate", "title": "승률(%)"},
+              {"field": "avg_kda", "title": "평균 KDA"},
+              {"field": "avg_damage", "title": "평균 딜량"},
+              {"field": "popularity_rank", "title": "인기순위"}
+            ],
+            "sort": [{"field": "win_rate", "order": "DESC"}],
+            "limit": 50,
+            "position": {"row": 9, "col": 1, "width": 6, "height": 4}
+          }
+        ],
+        "filters": [
+          {
+            "type": "dropdown",
+            "field": "champion_name",
+            "multiple": true
+          },
+          {
+            "type": "slider", 
+            "field": "games_played",
+            "min": 3,
+            "max": 100,
+            "default": 5
+          }
+        ]
+      },
+      {
+        "name": "포지션 분석",
+        "layout": "grid",
+        "components": [
+          {
+            "type": "radar_chart",
+            "title": "포지션별 평균 통계 비교",
+            "data_source": "position_stats",
+            "dimension": "team_position",
+            "metrics": [
+              "avg_kills",
+              "avg_deaths", 
+              "avg_assists",
+              "avg_damage",
+              "avg_gold",
+              "avg_vision_score"
+            ],
+            "position": {"row": 1, "col": 1, "width": 4, "height": 4}
+          },
+          {
+            "type": "bar_chart",
+            "title": "포지션별 승률",
+            "data_source": "position_stats",
+            "x_axis": "team_position",
+            "y_axis": "avg_win_rate",
+            "position": {"row": 1, "col": 5, "width": 2, "height": 4}
+          },
+          {
+            "type": "box_plot",
+            "title": "포지션별 KDA 분포",
+            "data_source": "player_performance",
+            "x_axis": "team_position",
+            "y_axis": "kda_ratio",
+            "position": {"row": 5, "col": 1, "width": 3, "height": 3}
+          },
+          {
+            "type": "table",
+            "title": "포지션별 인기 챔피언",
+            "data_source": "player_performance",
+            "columns": [
+              {"field": "team_position", "title": "포지션"},
+              {"field": "champion_name", "title": "챔피언"},
+              {"field": "COUNT(*)", "title": "픽 횟수"},
+              {"field": "AVG(CASE WHEN win THEN 1.0 ELSE 0.0 END)", "title": "승률"}
+            ],
+            "group_by": ["team_position", "champion_name"],
+            "sort": [{"field": "COUNT(*)", "order": "DESC"}],
+            "position": {"row": 5, "col": 4, "width": 3, "height": 3}
+          }
+        ]
+      },
+      {
+        "name": "게임 패턴",
+        "layout": "grid",
+        "components": [
+          {
+            "type": "histogram", 
+            "title": "게임 길이 분포",
+            "data_source": "match_analysis",
+            "x_axis": "game_duration_minutes",
+            "bins": 15,
+            "position": {"row": 1, "col": 1, "width": 3, "height": 3}
+          },
+          {
+            "type": "pie_chart",
+            "title": "게임 모드별 분포",
+            "data_source": "match_analysis", 
+            "dimension": "game_mode",
+            "metric": "COUNT(*)",
+            "position": {"row": 1, "col": 4, "width": 3, "height": 3}
+          },
+          {
+            "type": "line_chart",
+            "title": "시간대별 평균 게임 길이",
+            "data_source": "time_analysis",
+            "x_axis": "game_hour",
+            "y_axis": "avg_duration_minutes", 
+            "position": {"row": 4, "col": 1, "width": 6, "height": 3}
+          },
+          {
+            "type": "heatmap",
+            "title": "요일×시간 게임 패턴",
+            "data_source": "time_analysis",
+            "x_axis": "game_hour",
+            "y_axis": "day_name",
+            "metric": "games_count",
+            "position": {"row": 7, "col": 1, "width": 6, "height": 4}
+          }
+        ],
+        "filters": [
+          {
+            "type": "dropdown",
+            "field": "game_mode",
+            "multiple": true
+          },
+          {
+            "type": "slider",
+            "field": "game_duration_minutes", 
+            "min": 10,
+            "max": 60
+          }
+        ]
+      }
+    ],
+    "global_filters": [
+      {
+        "type": "date_range",
+        "field": "DATE(game_creation)",
+        "default": "LAST_30_DAYS",
+        "applies_to": ["match_analysis", "player_performance", "time_analysis"]
+      },
+      {
+        "type": "date_range", 
+        "field": "DATE(collected_at)",
+        "default": "LAST_30_DAYS",
+        "applies_to": ["challenger_dashboard", "kpi_summary"]
+      }
+    ]
+  },
+  "data_refresh": {
+    "schedule": "HOURLY",
+    "cache_duration": "12_HOURS"
+  },
+  "sharing": {
+    "public_access": false,
+    "embed_enabled": true,
+    "download_enabled": true
+  }
+}
